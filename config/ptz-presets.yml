@@ -1,0 +1,29 @@
+ptz_presets:
+  cam_001:
+    - id: 1
+      name: "Home Position"
+      pan: 0
+      tilt: 0
+      zoom: 1
+    - id: 2
+      name: "Gate View"
+      pan: 45
+      tilt: -10
+      zoom: 2
+    - id: 3
+      name: "Parking Lot"
+      pan: -30
+      tilt: -5
+      zoom: 1.5
+
+  cam_003:
+    - id: 1
+      name: "Thermal Home"
+      pan: 0
+      tilt: 0
+      zoom: 1
+    - id: 2
+      name: "Perimeter Scan"
+      pan: 90
+      tilt: 0
+      zoom: 1

@@ -1,0 +1,29 @@
+cameras:
+  - id: cam_001
+    name: "North Perimeter"
+    ip: "192.168.1.100"
+    username: "admin"
+    password: "password"
+    ptz: true
+    presets:
+      - id: 1
+        name: "Home Position"
+      - id: 2
+        name: "Gate View"
+      - id: 3
+        name: "Parking Lot"
+  
+  - id: cam_002
+    name: "South Gate"
+    ip: "192.168.1.101"
+    username: "admin"
+    password: "password"
+    ptz: false
+
+  - id: cam_003
+    name: "Thermal East"
+    ip: "192.168.1.102"
+    username: "admin"
+    password: "password"
+    ptz: true
+    thermal: true

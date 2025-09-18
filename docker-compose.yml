@@ -1,0 +1,172 @@
+version: '3.8'
+
+services:
+  # === CORE INFRASTRUCTURE ===
+  
+  # Portainer - Container Management UI
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: c2-portainer
+    restart: always
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    command: --admin-password='$$2y$$10$$X5PVCZ4sOB5w8vRnR5v2yOG3qGJfHtB.N8XZr8MkN9dqG8dNQZF3.'  # admin/c2admin
+    networks:
+      - c2-network
+
+  # DragonflyDB - Redis compatible but 25x faster
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: c2-dragonfly
+    restart: always
+    ports:
+      - "6379:6379"
+      - "6380:6380"  # HTTP monitoring
+    volumes:
+      - dragonfly_data:/data
+    command: >
+      --logtostderr
+      --cache_mode=true
+      --maxmemory=4gb
+      --proactor_threads=4
+      --enable_http=true
+      --http_port=6380
+      --dbfilename=c2-snapshot
+      --dir=/data
+      --snapshot_cron=0 */6 * * *
+    networks:
+      - c2-network
+
+  # Node-RED - Flow-based automation
+  nodered:
+    image: nodered/node-red:latest
+    container_name: c2-nodered
+    restart: always
+    ports:
+      - "1880:1880"
+    volumes:
+      - nodered_data:/data
+      - ./flows:/data/flows
+    environment:
+      - TZ=America/Los_Angeles
+      - NODE_RED_CREDENTIAL_SECRET=c2secret
+    depends_on:
+      - dragonfly
+    networks:
+      - c2-network
+
+  # === EVENT PROCESSING ===
+
+  # Bun WebSocket Server - Boomerang receiver
+  bun-websocket:
+    build:
+      context: ./services/bun-websocket
+      dockerfile: Dockerfile
+    container_name: c2-bun-ws
+    restart: always
+    ports:
+      - "3001:3000"      # WebSocket server (avoid conflict with Next.js)
+      - "4001:4001/udp"  # Boomerang UDP
+      - "8081:8081"      # Thermal webhooks
+    environment:
+      - DRAGONFLY_URL=redis://dragonfly:6379
+      - NODE_ENV=production
+    volumes:
+      - ./kml:/app/kml:ro
+    depends_on:
+      - dragonfly
+    networks:
+      - c2-network
+
+  # === CAMERA INTEGRATION ===
+
+  # ONVIF Wrapper Service
+  onvif-wrapper:
+    build:
+      context: ./services/onvif-wrapper
+      dockerfile: Dockerfile
+    container_name: c2-onvif
+    restart: always
+    ports:
+      - "8082:8082"  # REST API
+      - "8083:8083"  # WebSocket for PTZ
+    environment:
+      - DRAGONFLY_URL=redis://dragonfly:6379
+      - DISCOVERY_ENABLED=true
+      - DISCOVERY_INTERVAL=30
+    volumes:
+      - ./config/cameras.yml:/app/config/cameras.yml:ro
+    depends_on:
+      - dragonfly
+    networks:
+      - c2-network
+
+  # Slew2 PTZ Driver
+  slew2-driver:
+    build:
+      context: ./services/slew2-driver
+      dockerfile: Dockerfile
+    container_name: c2-slew2
+    restart: always
+    ports:
+      - "8090:8090"
+    environment:
+      - REDIS_URL=redis://dragonfly:6379
+      - SERIAL_PORT=/dev/ttyUSB0
+    volumes:
+      - ./config/ptz-presets.yml:/app/presets.yml
+    depends_on:
+      - dragonfly
+    networks:
+      - c2-network
+
+  # === EXISTING SERVICES (Keep what we built) ===
+
+  # Our C2 API Backend (existing FastAPI)
+  c2-api-existing:
+    build:
+      context: ./c2-backend
+      dockerfile: Dockerfile.existing
+    container_name: c2-api-existing
+    restart: always
+    ports:
+      - "8000:8000"  # Keep our existing API on 8000
+    environment:
+      - DATABASE_URL=sqlite:///./c2.db
+      - CORS_ORIGINS=http://localhost:3000
+    volumes:
+      - ./c2-backend:/app
+    networks:
+      - c2-network
+
+  # Our C2 Frontend (existing Next.js)
+  c2-frontend-existing:
+    build:
+      context: ./c2-frontend
+      dockerfile: Dockerfile.existing
+    container_name: c2-frontend-existing
+    restart: always
+    ports:
+      - "3000:3000"  # Keep our existing frontend on 3000
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
+    volumes:
+      - ./c2-frontend:/app
+    depends_on:
+      - c2-api-existing
+    networks:
+      - c2-network
+
+networks:
+  c2-network:
+    driver: bridge
+
+volumes:
+  portainer_data:
+  dragonfly_data:
+  nodered_data:
