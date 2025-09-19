@@ -1,0 +1,4 @@
+node_modules
+dist
+npm-debug.log
+# Keep pnpm-lock.yaml so Docker can copy it

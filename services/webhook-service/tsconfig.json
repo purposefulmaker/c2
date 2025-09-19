@@ -1,0 +1,62 @@
+{
+    "compilerOptions": {
+        /* Language and Environment */
+        "target": "ES2022",
+        "lib": ["ES2022"],
+        "module": "ESNext",                      // Use ESNext for tsx
+        "moduleResolution": "bundler",  
+
+        /* Emit */
+        "outDir": "./dist",                     // Output directory for compiled files
+        "rootDir": "./",                        // Root directory of source files
+        "noEmit": true,                        // We DO want to emit JS files for production
+        "sourceMap": true,                      // Generate source maps for debugging
+        "declaration": true,                    // Generate .d.ts files
+        "declarationMap": true,                 // Generate .d.ts.map files
+
+        /* Interop Constraints */
+        "esModuleInterop": true,                // Import CommonJS modules as ES6
+        "allowSyntheticDefaultImports": true,   // Allow default imports from CommonJS
+        "forceConsistentCasingInFileNames": true,
+        "isolatedModules": true,                // Ensure each file can be transpiled independently
+
+        /* Type Checking */
+        "strict": true,                         // Enable all strict type checks
+        "noUnusedLocals": true,                 // Error on unused locals
+        "noUnusedParameters": true,             // Error on unused parameters
+        "noImplicitReturns": true,              // Error on missing returns
+        "noFallthroughCasesInSwitch": true,    // Error on fallthrough cases
+        "noUncheckedIndexedAccess": true,       // Add undefined to index signatures
+
+        /* Module Resolution */
+        "resolveJsonModule": true,              // Allow importing .json files
+        "allowJs": true,                        // Allow importing .js files
+        "skipLibCheck": true,                   // Skip checking .d.ts files
+        "allowImportingTsExtensions": true,      // Allow .ts imports
+
+
+        /* Path Mapping */
+        "baseUrl": ".",
+        "paths": {
+            "@/*": ["./src/*"],
+            "@lib/*": ["./src/lib/*"],
+            "@types/*": ["./src/types/*"]
+        }
+    },
+    "include": [
+        "src/**/*",
+        "*.ts",
+        "*.js",
+        "../c2-frontend/src/components/payloads/simulators/simulators", "../c2-frontend/tests", "../c2-frontend/src/components/EntityStateViewer.tsx", "../c2-frontend/src/components/core"
+, "types/webhook.ts", "lib/payloadValidator.ts"    ],
+    "exclude": [
+        "node_modules",
+        "dist",
+        "**/*.test.ts",
+        "**/*.spec.ts"
+    ],
+    "ts-node": {
+        "esm": true,                           // Enable ESM support in ts-node
+        "experimentalSpecifierResolution": "node"
+    }
+}

@@ -6,6 +6,7 @@ from typing import List
 import json
 
 from database import get_db
+from auth_integration import require_permission, get_current_user
 from models import Device
 
 router = APIRouter()
@@ -29,7 +30,7 @@ async def get_devices(db: AsyncSession = Depends(get_db)):
         for device in devices
     ]
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(require_permission("devices", "write"))])
 async def create_device(device_data: dict, db: AsyncSession = Depends(get_db)):
     """Create a new device"""
     device = Device(
@@ -49,7 +50,7 @@ async def create_device(device_data: dict, db: AsyncSession = Depends(get_db)):
     
     return {"status": "success", "device_id": device.device_id}
 
-@router.patch("/{device_id}/status")
+@router.patch("/{device_id}/status", dependencies=[Depends(require_permission("devices", "control"))])
 async def update_device_status(device_id: str, status_data: dict, db: AsyncSession = Depends(get_db)):
     """Update device status"""
     result = await db.execute(select(Device).where(Device.device_id == device_id))

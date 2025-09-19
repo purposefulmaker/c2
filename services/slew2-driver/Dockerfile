@@ -2,6 +2,9 @@ FROM node:18-alpine
 
 WORKDIR /app
 
+# Install dependencies for serial port
+RUN apk add --no-cache python3 make g++ linux-headers
+
 # Install dependencies
 COPY package*.json ./
 RUN npm ci
@@ -12,6 +15,6 @@ COPY . .
 # Build TypeScript
 RUN npm run build
 
-EXPOSE 8082 8083
+EXPOSE 8090
 
 CMD ["npm", "start"]

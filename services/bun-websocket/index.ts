@@ -2,6 +2,11 @@
 import { serve, ServerWebSocket } from "bun";
 import Redis from "ioredis";
 
+// Type for WebSocket client data
+interface WebSocketData {
+  id: string;
+}
+
 // Connect to DragonflyDB (Redis compatible)
 const redis = new Redis({
   host: process.env.DRAGONFLY_URL?.replace('redis://', '') || "dragonfly",
@@ -21,7 +26,7 @@ const publisher = new Redis({
 });
 
 // WebSocket clients
-const clients = new Map<string, ServerWebSocket>();
+const clients = new Map<string, ServerWebSocket<WebSocketData>>();
 
 // Subscribe to Boomerang alarm events
 subscriber.subscribe("boomerang:alarms", "events:gunshot", "events:thermal");
@@ -114,7 +119,7 @@ const server = serve({
       });
     }
 
-    return new Response(`
+  return new Response(`
 <!DOCTYPE html>
 <html>
 <head>
@@ -132,7 +137,7 @@ const server = serve({
     <div class="status">
         <p><strong>Status:</strong> Running</p>
         <p><strong>Clients:</strong> <span id="clientCount">${clients.size}</span></p>
-        <p><strong>WebSocket:</strong> ws://localhost:3000/ws</p>
+  <p><strong>WebSocket:</strong> <span id="wsUrl"></span></p>
     </div>
     <div>
         <button onclick="triggerGunshot()">🔫 Trigger Gunshot</button>
@@ -150,8 +155,10 @@ const server = serve({
             log.scrollTop = log.scrollHeight;
         }
         
-        function connectWS() {
-            ws = new WebSocket('ws://localhost:3000/ws');
+    function connectWS() {
+      const wsUrl = (location.origin.replace(/^http/, 'ws')) + '/ws';
+      document.getElementById('wsUrl').textContent = wsUrl;
+      ws = new WebSocket(wsUrl);
             ws.onopen = () => addLog('✅ WebSocket connected');
             ws.onmessage = (event) => addLog('📡 ' + event.data);
             ws.onclose = () => addLog('❌ WebSocket disconnected');
@@ -181,7 +188,7 @@ const server = serve({
   },
 
   websocket: {
-    open(ws) {
+    open(ws: ServerWebSocket<WebSocketData>) {
       const id = crypto.randomUUID();
       clients.set(id, ws);
       ws.data = { id };
@@ -197,7 +204,7 @@ const server = serve({
       }));
     },
 
-    message(ws, message) {
+    message(ws: ServerWebSocket<WebSocketData>, message: string | Buffer) {
       try {
         const data = JSON.parse(message.toString());
         console.log(`📨 Message from ${ws.data.id}:`, data);
@@ -211,7 +218,7 @@ const server = serve({
       }
     },
 
-    close(ws) {
+    close(ws: ServerWebSocket<WebSocketData>) {
       const id = ws.data?.id;
       if (id) {
         clients.delete(id);
@@ -224,8 +231,8 @@ const server = serve({
 // UDP Listener for legacy Boomerang devices
 const udpSocket = Bun.udpSocket({
   port: 4001,
-  handler: {
-    data(socket, buf, port, addr) {
+  socket: {
+    data(socket, buf, port: number, addr: string) {
       console.log(`📡 UDP packet from ${addr}:${port}`);
       
       // Parse Boomerang UDP protocol

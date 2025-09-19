@@ -1,0 +1,99 @@
+# Railway deployment configuration for C2 Vendor Stack
+# This deploys the complete vendor implementation
+
+services:
+  # === Core Infrastructure ===
+  
+  dragonfly:
+    name: "c2-dragonfly"
+    image: "docker.dragonflydb.io/dragonflydb/dragonfly:latest"
+    env:
+      PORT: "6379"
+    healthcheck:
+      path: "/metrics"
+      port: 6380
+    volumes:
+      - name: "dragonfly-data"
+        mount: "/data"
+    resources:
+      memory: "1GB"
+      cpu: "0.5"
+
+  # === Event Processing ===
+  
+  bun-websocket:
+    name: "c2-bun-ws"
+    source: "./services/bun-websocket"
+    build:
+      dockerfile: "Dockerfile"
+    env:
+      PORT: "3000"
+      DRAGONFLY_URL: "${{dragonfly.RAILWAY_PRIVATE_DOMAIN}}:6379"
+      NODE_ENV: "production"
+    healthcheck:
+      path: "/api/stats"
+    depends_on:
+      - dragonfly
+
+  # === Camera Services ===
+  
+  onvif-wrapper:
+    name: "c2-onvif"
+    source: "./services/onvif-wrapper"
+    build:
+      dockerfile: "Dockerfile"
+    env:
+      PORT: "8082"
+      DRAGONFLY_URL: "redis://${{dragonfly.RAILWAY_PRIVATE_DOMAIN}}:6379"
+      DISCOVERY_ENABLED: "true"
+    healthcheck:
+      path: "/health"
+    depends_on:
+      - dragonfly
+
+  slew2-driver:
+    name: "c2-slew2"
+    source: "./services/slew2-driver"
+    build:
+      dockerfile: "Dockerfile"
+    env:
+      PORT: "8090"
+      REDIS_URL: "redis://${{dragonfly.RAILWAY_PRIVATE_DOMAIN}}:6379"
+    healthcheck:
+      path: "/health"
+    depends_on:
+      - dragonfly
+
+  # === C2 Platform ===
+  
+  c2-backend:
+    name: "c2-api"
+    source: "./c2-backend"
+    build:
+      dockerfile: "Dockerfile"
+    env:
+      PORT: "8000"
+      DATABASE_URL: "sqlite:///./c2.db"
+      CORS_ORIGINS: "${{c2-frontend.RAILWAY_STATIC_URL}}"
+      REDIS_URL: "redis://${{dragonfly.RAILWAY_PRIVATE_DOMAIN}}:6379"
+    healthcheck:
+      path: "/health"
+    depends_on:
+      - dragonfly
+      - bun-websocket
+      - onvif-wrapper
+      - slew2-driver
+
+  c2-frontend:
+    name: "c2-frontend"
+    source: "./c2-frontend"
+    build:
+      dockerfile: "Dockerfile"
+    env:
+      NEXT_PUBLIC_API_URL: "${{c2-backend.RAILWAY_STATIC_URL}}"
+      NEXT_PUBLIC_WS_URL: "${{c2-backend.RAILWAY_STATIC_URL}}"
+      NEXT_PUBLIC_BUN_WS_URL: "${{bun-websocket.RAILWAY_STATIC_URL}}"
+    healthcheck:
+      path: "/"
+    depends_on:
+      - c2-backend

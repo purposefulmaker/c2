@@ -18,7 +18,7 @@ export const azureConfig: AzureConfig = {
 };
 
 export const buildPassportConfig = (cfg: AzureConfig) => ({
-  identityMetadata: `${cfg.authority}/v2.0/.well-known/openid_configuration`,
+  identityMetadata: `${cfg.authority}/v2.0/.well-known/openid-configuration`,
   clientID: cfg.clientId,
   clientSecret: cfg.clientSecret,
   responseType: 'code',

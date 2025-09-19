@@ -1,9 +1,10 @@
 # backend/api/cameras.py
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from auth_integration import require_permission
 
 router = APIRouter()
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(require_permission("cameras", "view"))])
 async def get_cameras():
     """Get all cameras"""
     return [
@@ -27,7 +28,7 @@ async def get_cameras():
         }
     ]
 
-@router.post("/{camera_id}/ptz")
+@router.post("/{camera_id}/ptz", dependencies=[Depends(require_permission("cameras", "ptz"))])
 async def control_ptz(camera_id: str, ptz_data: dict):
     """Control PTZ camera"""
     return {

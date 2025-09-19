@@ -1,12 +1,19 @@
 // services/auth-service/src/services/rbac.ts
 import { User, Role, Permission, PermissionType, PERMISSIONS, ROLES } from '../types/auth.js';
+import { v4 as uuidv4 } from 'uuid';
 
 export class RBACService {
   private static instance: RBACService;
   private defaultRoles: Map<string, Permission[]> = new Map();
+  private users: any; // Add users property - replace with proper type
 
   constructor() {
     this.initializeDefaultRoles();
+    // Initialize users service - replace with proper implementation
+    this.users = {
+      findByExternalId: async (provider: string, externalId: string) => null,
+      create: async (userData: any) => ({ id: uuidv4(), ...userData })
+    };
   }
 
   static getInstance(): RBACService {
@@ -143,7 +150,7 @@ export class RBACService {
     const permissions = this.getDefaultPermissions(roleName);
     
     return {
-      id: crypto.randomUUID(),
+      id: uuidv4(),
       email: azureProfile.email || azureProfile.preferred_username,
       name: azureProfile.name || azureProfile.displayName,
       azure_oid: azureProfile.oid,
@@ -151,7 +158,7 @@ export class RBACService {
       last_login: new Date().toISOString(),
       is_active: true,
       roles: [{
-        id: crypto.randomUUID(),
+        id: uuidv4(),
         name: roleName,
         description: `Default ${roleName} role`,
         permissions
@@ -176,5 +183,43 @@ export class RBACService {
     }
 
     return false;
+  }
+
+  private async applyExternalRoles(userId: string, roles: string[]): Promise<void> {
+    // Implementation for applying external roles
+    // Replace with proper role assignment logic
+  }
+
+  private async ensureDefaultRole(userId: string): Promise<void> {
+    // Implementation for ensuring default role
+    // Replace with proper default role assignment logic
+  }
+
+  async findOrCreateExternalUser(input: {
+    externalId: string;
+    provider: 'azure';
+    tenantId?: string;
+    name?: string | null;
+    email?: string | null;
+    roles?: string[];
+  }) {
+    // Prefer externalId (oid) as unique key
+    let user = await this.users.findByExternalId(input.provider, input.externalId);
+    if (!user) {
+      user = await this.users.create({
+        externalProvider: input.provider,
+        externalId: input.externalId,
+        tenantId: input.tenantId || null,
+        displayName: input.name || input.email || 'Unknown',
+        primaryEmail: input.email || null
+      });
+    }
+    // Apply roles from Azure (app roles) if present
+    if (input.roles && input.roles.length) {
+      await this.applyExternalRoles(user.id, input.roles);
+    } else {
+      await this.ensureDefaultRole(user.id); // your existing default
+    }
+    return user;
   }
 }
