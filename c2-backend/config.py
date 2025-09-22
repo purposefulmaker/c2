@@ -3,7 +3,8 @@ from pydantic_settings import BaseSettings
 from typing import Optional
 
 class Settings(BaseSettings):
-    DATABASE_URL: str = "sqlite+aiosqlite:///./c2.db"
+    # Default to Postgres in Docker; override with .env for local non-Docker
+    DATABASE_URL: str = "postgresql+asyncpg://c2:devpassword@postgres:5432/c2_local"
     REDIS_URL: str = "redis://localhost:6379"
     JWT_SECRET: str = "your-secret-key"
     ALGORITHM: str = "HS256"

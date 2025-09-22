@@ -1,4 +1,4 @@
-// services/onvif-wrapper/index.ts - ONVIF camera integration
+// services/onvif-wrapper/index.ts - ONVIF camera integration with LRAD support
 import express, { Request, Response } from 'express';
 import WebSocket from 'ws';
 import { Discovery, Cam } from 'onvif';
@@ -6,6 +6,7 @@ import Redis from 'ioredis';
 import yaml from 'js-yaml';
 import fs from 'fs';
 import cors from 'cors';
+import { LRADONVIFProfile, createLRADONVIFProfile, type LRADConfiguration } from './src/lrad-onvif-profile';
 
 const app = express();
 app.use(cors());
@@ -22,6 +23,19 @@ interface CameraConfig {
   analytics?: boolean;
 }
 
+interface LRADConfig {
+  id: string;
+  name: string;
+  endpoint: string; // WebSocket endpoint for LRAD device
+  model: string;
+  position: {
+    latitude: number;
+    longitude: number;
+    elevation?: number;
+  };
+  enabled: boolean;
+}
+
 interface CameraInfo {
   id: string;
   name: string;
@@ -33,6 +47,15 @@ interface CameraInfo {
     rtsp?: string;
     snapshot?: string;
   };
+}
+
+interface LRADInfo {
+  id: string;
+  name: string;
+  endpoint: string;
+  profile: LRADONVIFProfile;
+  config: LRADConfig;
+  status: 'online' | 'offline' | 'error';
 }
 
 
@@ -72,6 +95,7 @@ interface CameraRegistration {
 
 interface Config {
   cameras: CameraConfig[];
+  lrads: LRADConfig[];
 }
 
 // Connect to DragonflyDB
@@ -84,17 +108,23 @@ const redis = new Redis({
 // WebSocket server for real-time PTZ control
 const wss = new WebSocket.Server({ port: 8083 });
 
-// Camera registry
+// Camera and LRAD registries
 const cameras = new Map<string, CameraInfo>();
-let config: Config = { cameras: [] };
+const lrads = new Map<string, LRADInfo>();
+let config: Config = { cameras: [], lrads: [] };
 
-// Load camera configuration
+// Load camera and LRAD configuration
 try {
   const configData = fs.readFileSync('/app/config/cameras.yml', 'utf8');
-  config = yaml.load(configData) as Config || { cameras: [] };
+  config = yaml.load(configData) as Config || { cameras: [], lrads: [] };
+  
+  // Ensure lrads array exists
+  if (!config.lrads) {
+    config.lrads = [];
+  }
 } catch (error) {
   console.warn('No camera config found, using discovery mode');
-  config = { cameras: [] };
+  config = { cameras: [], lrads: [] };
 }
 
 // Initialize ONVIF cameras
@@ -184,6 +214,55 @@ async function initializeCameras(): Promise<void> {
   }
 }
 
+// Initialize LRAD devices
+async function initializeLRADs(): Promise<void> {
+  console.log('📢 Initializing LRAD devices...');
+  
+  for (const lradConfig of config.lrads) {
+    try {
+      console.log(`Connecting to LRAD: ${lradConfig.name} (${lradConfig.endpoint})`);
+      
+      const profile = createLRADONVIFProfile(lradConfig.id, lradConfig.endpoint);
+      
+      // Initialize the ONVIF profile
+      await profile.initialize();
+      
+      // Store LRAD info
+      lrads.set(lradConfig.id, {
+        id: lradConfig.id,
+        name: lradConfig.name,
+        endpoint: lradConfig.endpoint,
+        profile: profile,
+        config: lradConfig,
+        status: 'online'
+      });
+      
+      // Register with C2 backend as a special "camera" with audio capabilities
+      await registerLRADWithC2Backend(lradConfig.id, {
+        name: lradConfig.name,
+        model: lradConfig.model,
+        position: lradConfig.position,
+        capabilities: ['ptz', 'audio_output', 'deterrent']
+      });
+      
+      console.log(`✅ Connected to LRAD: ${lradConfig.name}`);
+      
+    } catch (error) {
+      console.error(`Error initializing LRAD ${lradConfig.name}:`, error);
+      
+      // Mark as offline but keep in registry for retry
+      lrads.set(lradConfig.id, {
+        id: lradConfig.id,
+        name: lradConfig.name,
+        endpoint: lradConfig.endpoint,
+        profile: createLRADONVIFProfile(lradConfig.id, lradConfig.endpoint),
+        config: lradConfig,
+        status: 'error'
+      });
+    }
+  }
+}
+
 // Register camera with our existing C2 backend
 async function registerWithC2Backend(cameraId: string, cameraInfo: Omit<CameraRegistration, 'timestamp' | 'source'>): Promise<void> {
   try {
@@ -205,6 +284,31 @@ async function registerWithC2Backend(cameraId: string, cameraInfo: Omit<CameraRe
     console.log(`📡 Registered ${cameraId} with C2 backend`);
   } catch (error) {
     console.error('Failed to register camera with C2 backend:', error);
+  }
+}
+
+// Register LRAD with C2 backend
+async function registerLRADWithC2Backend(lradId: string, lradInfo: any): Promise<void> {
+  try {
+    const registration = {
+      ...lradInfo,
+      timestamp: new Date().toISOString(),
+      source: 'onvif-wrapper',
+      deviceType: 'lrad'
+    };
+
+    // Store in DragonflyDB for our backend to discover
+    await redis.hset('lrads:registry', lradId, JSON.stringify(registration));
+    
+    // Publish LRAD registration event
+    await redis.publish('lrads:registered', JSON.stringify({
+      lrad_id: lradId,
+      ...lradInfo
+    }));
+    
+    console.log(`📡 Registered LRAD ${lradId} with C2 backend`);
+  } catch (error) {
+    console.error('Failed to register LRAD with C2 backend:', error);
   }
 }
 
@@ -267,6 +371,180 @@ async function processAnalyticsEvent(cameraId: string, message: any): Promise<vo
   console.log(`📡 Camera event: ${event.type} from ${cameraId}`);
 }
 
+// Process S2C (Slew2Cue) queue for coordinated PTZ/LRAD commands
+async function processS2CQueue(): Promise<void> {
+  try {
+    // Listen for S2C commands from slew2-driver
+    const command = await redis.brpop('queue:s2c_commands', 1);
+    
+    if (command) {
+      const s2cCommand = JSON.parse(command[1]);
+      console.log('📡 Processing S2C command:', s2cCommand);
+      
+      switch (s2cCommand.type) {
+        case 'threat_response':
+          await handleThreatResponse(s2cCommand);
+          break;
+          
+        case 'lrad_activation':
+          await handleLRADActivation(s2cCommand);
+          break;
+          
+        case 'coordinated_ptz':
+          await handleCoordinatedPTZ(s2cCommand);
+          break;
+          
+        default:
+          console.warn('Unknown S2C command type:', s2cCommand.type);
+      }
+    }
+  } catch (error) {
+    console.error('S2C queue processing error:', error);
+  }
+  
+  // Continue processing
+  setImmediate(processS2CQueue);
+}
+
+// Handle threat response coordination
+async function handleThreatResponse(command: any): Promise<void> {
+  const { threatPosition, assets, response } = command;
+  
+  console.log(`🚨 Threat response: ${response.type} at ${threatPosition.lat}, ${threatPosition.lng}`);
+  
+  // Execute camera PTZ commands
+  if (assets.cameras && assets.cameras.length > 0) {
+    for (const cameraAsset of assets.cameras) {
+      const camera = cameras.get(cameraAsset.id);
+      if (camera && camera.onvif) {
+        try {
+          // Slew camera to threat position
+          await camera.onvif.absoluteMove({
+            x: cameraAsset.ptz.pan,
+            y: cameraAsset.ptz.tilt,
+            zoom: cameraAsset.ptz.zoom
+          });
+          
+          console.log(`📹 Slewed camera ${cameraAsset.id} to threat`);
+        } catch (error) {
+          console.error(`Failed to slew camera ${cameraAsset.id}:`, error);
+        }
+      }
+    }
+  }
+  
+  // Execute LRAD commands
+  if (assets.lrads && assets.lrads.length > 0) {
+    for (const lradAsset of assets.lrads) {
+      const lrad = lrads.get(lradAsset.id);
+      if (lrad && lrad.status === 'online') {
+        try {
+          // Position LRAD
+          await lrad.profile.absoluteMove(
+            lradAsset.ptz.pan,
+            lradAsset.ptz.tilt,
+            lradAsset.ptz.zoom
+          );
+          
+          // Activate appropriate response
+          switch (response.type) {
+            case 'voice_warning':
+              await lrad.profile.announceVoice(response.message);
+              break;
+              
+            case 'deterrent':
+              await lrad.profile.activateDeterrent(response.config);
+              break;
+              
+            case 'siren':
+              await lrad.profile.activateSiren(response.config);
+              break;
+          }
+          
+          console.log(`📢 Activated LRAD ${lradAsset.id} - ${response.type}`);
+        } catch (error) {
+          console.error(`Failed to activate LRAD ${lradAsset.id}:`, error);
+        }
+      }
+    }
+  }
+}
+
+// Handle LRAD activation commands
+async function handleLRADActivation(command: any): Promise<void> {
+  const { lradId, action, config } = command;
+  const lrad = lrads.get(lradId);
+  
+  if (!lrad || lrad.status !== 'online') {
+    console.error(`LRAD ${lradId} not available for activation`);
+    return;
+  }
+  
+  try {
+    switch (action) {
+      case 'voice':
+        await lrad.profile.announceVoice(config.message, config);
+        break;
+        
+      case 'deterrent':
+        await lrad.profile.activateDeterrent(config);
+        break;
+        
+      case 'siren':
+        await lrad.profile.activateSiren(config);
+        break;
+        
+      case 'standby':
+        await lrad.profile.enterStandby();
+        break;
+        
+      default:
+        console.warn(`Unknown LRAD action: ${action}`);
+    }
+    
+    console.log(`📢 LRAD ${lradId} executed: ${action}`);
+  } catch (error) {
+    console.error(`LRAD activation error for ${lradId}:`, error);
+  }
+}
+
+// Handle coordinated PTZ commands
+async function handleCoordinatedPTZ(command: any): Promise<void> {
+  const { devices } = command;
+  
+  for (const device of devices) {
+    if (device.type === 'camera') {
+      const camera = cameras.get(device.id);
+      if (camera && camera.onvif) {
+        try {
+          await camera.onvif.absoluteMove({
+            x: device.ptz.pan,
+            y: device.ptz.tilt,
+            zoom: device.ptz.zoom
+          });
+          console.log(`📹 Coordinated PTZ: ${device.id}`);
+        } catch (error) {
+          console.error(`Coordinated PTZ error for ${device.id}:`, error);
+        }
+      }
+    } else if (device.type === 'lrad') {
+      const lrad = lrads.get(device.id);
+      if (lrad && lrad.status === 'online') {
+        try {
+          await lrad.profile.absoluteMove(
+            device.ptz.pan,
+            device.ptz.tilt,
+            device.ptz.zoom
+          );
+          console.log(`📢 Coordinated PTZ: ${device.id}`);
+        } catch (error) {
+          console.error(`Coordinated PTZ error for ${device.id}:`, error);
+        }
+      }
+    }
+  }
+}
+
 // REST API Endpoints
 
 // Get all cameras
@@ -282,6 +560,20 @@ app.get('/api/cameras', async (_req: Request, res: Response): Promise<void> => {
   }));
 
   res.json(cameraList);
+});
+
+// Get all LRADs
+app.get('/api/lrads', async (_req: Request, res: Response): Promise<void> => {
+  const lradList = Array.from(lrads.values()).map(lrad => ({
+    id: lrad.id,
+    name: lrad.name,
+    status: lrad.status,
+    model: lrad.config.model,
+    position: lrad.config.position,
+    onvifStatus: lrad.profile.getStatus()
+  }));
+
+  res.json(lradList);
 });
 
 // Get camera by ID
@@ -300,6 +592,24 @@ app.get('/api/cameras/:id', async (req: Request, res: Response): Promise<void> =
     ptz: camera.config.ptz || false,
     streams: camera.streams,
     capabilities: camera.capabilities
+  });
+});
+
+// Get LRAD by ID
+app.get('/api/lrads/:id', async (req: Request, res: Response): Promise<void> => {
+  const lrad = lrads.get(req.params.id);
+  if (!lrad) {
+    res.status(404).json({ error: 'LRAD not found' });
+    return;
+  }
+
+  res.json({
+    id: lrad.id,
+    name: lrad.name,
+    status: lrad.status,
+    model: lrad.config.model,
+    position: lrad.config.position,
+    onvifStatus: lrad.profile.getStatus()
   });
 });
 
@@ -361,6 +671,110 @@ app.post('/api/cameras/:id/ptz', async (req: Request, res: Response): Promise<vo
   }
 });
 
+// LRAD PTZ Control
+app.post('/api/lrads/:id/ptz', async (req: Request, res: Response): Promise<void> => {
+  const lrad = lrads.get(req.params.id);
+  if (!lrad || lrad.status !== 'online') {
+    res.status(404).json({ error: 'LRAD not found or offline' });
+    return;
+  }
+
+  const { pan, tilt, zoom, action, preset }: PTZCommand = req.body;
+
+  try {
+    if (action === 'preset' && preset) {
+      // Go to preset
+      await lrad.profile.gotoPreset(preset.toString());
+      res.json({ status: 'ok', action: 'preset', preset });
+      
+    } else if (action === 'move') {
+      // Absolute move (ONVIF coordinates)
+      await lrad.profile.absoluteMove(pan || 0, tilt || 0, zoom || 1);
+      res.json({ status: 'ok', action: 'move', pan, tilt, zoom });
+      
+    } else if (action === 'stop') {
+      // Stop movement
+      await lrad.profile.stop();
+      res.json({ status: 'ok', action: 'stop' });
+      
+    } else {
+      res.status(400).json({ error: 'Invalid LRAD PTZ action' });
+      return;
+    }
+
+    // Log PTZ command to DragonflyDB
+    await redis.lpush('queue:lrad_ptz_commands', JSON.stringify({
+      lrad_id: req.params.id,
+      action,
+      parameters: { pan, tilt, zoom, preset },
+      timestamp: new Date().toISOString()
+    }));
+
+  } catch (error) {
+    console.error('LRAD PTZ error:', error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// LRAD Activation Control
+app.post('/api/lrads/:id/activate', async (req: Request, res: Response): Promise<void> => {
+  const lrad = lrads.get(req.params.id);
+  if (!lrad || lrad.status !== 'online') {
+    res.status(404).json({ error: 'LRAD not found or offline' });
+    return;
+  }
+
+  const { action, config: actionConfig } = req.body;
+
+  try {
+    let result;
+    
+    switch (action) {
+      case 'voice':
+        if (!actionConfig?.message) {
+          res.status(400).json({ error: 'Voice message required' });
+          return;
+        }
+        await lrad.profile.announceVoice(actionConfig.message, actionConfig);
+        result = { action: 'voice', message: actionConfig.message };
+        break;
+        
+      case 'deterrent':
+        await lrad.profile.activateDeterrent(actionConfig);
+        result = { action: 'deterrent', config: actionConfig };
+        break;
+        
+      case 'siren':
+        await lrad.profile.activateSiren(actionConfig);
+        result = { action: 'siren', config: actionConfig };
+        break;
+        
+      case 'standby':
+        await lrad.profile.enterStandby();
+        result = { action: 'standby' };
+        break;
+        
+      default:
+        res.status(400).json({ error: 'Invalid LRAD action' });
+        return;
+    }
+
+    // Log activation command
+    await redis.lpush('queue:lrad_activations', JSON.stringify({
+      lrad_id: req.params.id,
+      action,
+      config: actionConfig,
+      timestamp: new Date().toISOString()
+    }));
+
+    res.json({ status: 'ok', ...result });
+
+  } catch (error) {
+    console.error('LRAD activation error:', error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 // Get snapshot
 app.get('/api/cameras/:id/snapshot', async (req: Request, res: Response): Promise<void> => {
   const camera = cameras.get(req.params.id);
@@ -408,9 +822,16 @@ app.post('/api/discover', async (_req: Request, res: Response): Promise<void> =>
 
 // Health check
 app.get('/health', (_req: Request, res: Response): void => {
+  const lradStatus = Array.from(lrads.values()).reduce((acc, lrad) => {
+    acc[lrad.status] = (acc[lrad.status] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+
   res.json({
     status: 'healthy',
     cameras: cameras.size,
+    lrads: lrads.size,
+    lradStatus,
     uptime: process.uptime(),
     timestamp: new Date().toISOString()
   });
@@ -420,10 +841,13 @@ app.get('/health', (_req: Request, res: Response): void => {
 interface WSMessage {
   type: string;
   camera_id?: string;
+  lrad_id?: string;
   action?: string;
   pan?: number;
   tilt?: number;
   zoom?: number;
+  config?: any;
+  message?: string;
 }
 
 wss.on('connection', (ws: WebSocket) => {
@@ -432,7 +856,7 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('message', async (message: WebSocket.Data) => {
     try {
       const command: WSMessage = JSON.parse(message.toString());
-      console.log('🎮 PTZ WebSocket command:', command);
+      console.log('🎮 WebSocket command:', command);
       
       if (command.type === 'ptz' && command.camera_id) {
         const camera = cameras.get(command.camera_id);
@@ -459,6 +883,63 @@ wss.on('connection', (ws: WebSocket) => {
             }
           });
         }
+      } else if (command.type === 'lrad_ptz' && command.lrad_id) {
+        const lrad = lrads.get(command.lrad_id);
+        if (lrad && lrad.status === 'online') {
+          // Execute LRAD PTZ command
+          if (command.action === 'move') {
+            await lrad.profile.absoluteMove(
+              command.pan || 0,
+              command.tilt || 0, 
+              command.zoom || 1
+            );
+          } else if (command.action === 'stop') {
+            await lrad.profile.stop();
+          }
+          
+          // Broadcast to all connected clients
+          wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({
+                type: 'lrad_ptz_executed',
+                lrad_id: command.lrad_id,
+                command
+              }));
+            }
+          });
+        }
+      } else if (command.type === 'lrad_activate' && command.lrad_id) {
+        const lrad = lrads.get(command.lrad_id);
+        if (lrad && lrad.status === 'online') {
+          // Execute LRAD activation
+          switch (command.action) {
+            case 'voice':
+              if (command.message) {
+                await lrad.profile.announceVoice(command.message, command.config);
+              }
+              break;
+            case 'deterrent':
+              await lrad.profile.activateDeterrent(command.config);
+              break;
+            case 'siren':
+              await lrad.profile.activateSiren(command.config);
+              break;
+            case 'standby':
+              await lrad.profile.enterStandby();
+              break;
+          }
+          
+          // Broadcast to all connected clients
+          wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({
+                type: 'lrad_activated',
+                lrad_id: command.lrad_id,
+                command
+              }));
+            }
+          });
+        }
       }
     } catch (error) {
       console.error('WebSocket command error:', error);
@@ -475,11 +956,18 @@ async function start(): Promise<void> {
   // Initialize cameras
   await initializeCameras();
   
+  // Initialize LRADs
+  await initializeLRADs();
+  
+  // Start S2C queue processing
+  processS2CQueue();
+  
   // Start HTTP server
   app.listen(8082, () => {
     console.log('🚀 ONVIF Wrapper Service running on port 8082');
     console.log('🔌 PTZ WebSocket server on port 8083');
     console.log('🎥 Cameras initialized:', cameras.size);
+    console.log('📢 LRADs initialized:', lrads.size);
   });
   
   // Auto-discovery every 30 seconds if enabled

@@ -17,6 +17,7 @@ services:
       - REDIS_PORT=6379
       - NODE_ENV=development
       - FRONTEND_URL=http://localhost:3006
+      - AUTH_PUBLIC_URL=https://c2-auth.loca.lt
       - ENABLE_LOCAL_LOGIN=true
     depends_on:
       - dragonfly
@@ -30,11 +31,12 @@ services:
     container_name: c2-backend
     environment:
       - REDIS_URL=redis://dragonfly:6379
-      - DATABASE_URL=sqlite+aiosqlite:///./c2.db
+      - DATABASE_URL=postgresql+asyncpg://c2:devpassword@postgres:5432/c2_local
       - ENABLE_MOCK_DEVICES=true
       - JWT_SECRET=dev-backend-secret
     depends_on:
       - dragonfly
+      - postgres
     ports:
       - "8000:8000"
     restart: unless-stopped
@@ -46,8 +48,38 @@ services:
     environment:
       - NEXT_PUBLIC_AUTH_URL=https://c2-auth.loca.lt
       - NODE_ENV=development
+      - DATABASE_URL=postgresql://c2:devpassword@neon-wsproxy:4444/c2_local
     ports:
       - "3006:3000"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: c2-postgres
+    environment:
+      - POSTGRES_DB=c2_local
+      - POSTGRES_USER=c2
+      - POSTGRES_PASSWORD=devpassword
+    ports:
+      - "5442:5432"   # host:container (kept host >3005)
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  neon-wsproxy:
+    image: ghcr.io/neondatabase/wsproxy:latest
+    container_name: neon-wsproxy
+    environment:
+      - LISTEN=0.0.0.0:4444
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGUSER=c2
+      - PGPASSWORD=devpassword
+      - PGDATABASE=c2_local
+    ports:
+      - "4444:4444"
+    depends_on:
+      - postgres
     restart: unless-stopped
 
   bun-websocket:
@@ -109,7 +141,6 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3001
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
     restart: unless-stopped
 
 networks:
@@ -118,3 +149,4 @@ networks:
 
 volumes:
   node-red-data:
+  postgres-data:
